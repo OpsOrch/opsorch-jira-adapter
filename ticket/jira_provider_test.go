@@ -82,6 +82,7 @@ func TestNew(t *testing.T) {
 			name: "valid config",
 			config: map[string]any{
 				"apiToken":   "test-token",
+				"email":      "test@example.com",
 				"projectKey": "PROJ",
 			},
 			expectErr: false,
@@ -115,8 +116,8 @@ func TestNew(t *testing.T) {
 func TestCreate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/rest/api/3/issue" && r.Method == "POST" {
-			// Verify auth header
-			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			// Verify auth header (Basic Auth)
+			if r.Header.Get("Authorization") == "" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -169,6 +170,7 @@ func TestCreate(t *testing.T) {
 	p := &JiraProvider{
 		cfg: Config{
 			Source:           "jira",
+			Email:            "test@example.com",
 			APIToken:         "test-token",
 			APIURL:           server.URL,
 			ProjectKey:       "PROJ",
@@ -239,6 +241,16 @@ func TestGet(t *testing.T) {
 					"status": map[string]any{
 						"name": "To Do",
 					},
+					"priority": map[string]any{
+						"id":   "3",
+						"name": "High",
+					},
+					"issuetype": map[string]any{
+						"id":   "10001",
+						"name": "Bug",
+					},
+					"labels":     []string{"backend", "urgent"},
+					"components": []map[string]any{{"id": "10000", "name": "API"}},
 					"assignee": map[string]any{
 						"accountId":   "user123",
 						"displayName": "Alice",
@@ -269,6 +281,7 @@ func TestGet(t *testing.T) {
 	p := &JiraProvider{
 		cfg: Config{
 			Source:     "jira",
+			Email:      "test@example.com",
 			APIToken:   "test-token",
 			APIURL:     server.URL,
 			ProjectKey: "PROJ",
@@ -300,6 +313,18 @@ func TestGet(t *testing.T) {
 		if ticket.Reporter != "user456" {
 			t.Errorf("Reporter = %v, want user456", ticket.Reporter)
 		}
+		if ticket.Metadata["priority"] != "High" {
+			t.Errorf("Metadata[priority] = %v, want High", ticket.Metadata["priority"])
+		}
+		if ticket.Metadata["issue_type"] != "Bug" {
+			t.Errorf("Metadata[issue_type] = %v, want Bug", ticket.Metadata["issue_type"])
+		}
+		if labels, ok := ticket.Metadata["labels"].([]string); !ok || len(labels) != 2 {
+			t.Errorf("Metadata[labels] = %v, want []string with 2 items", ticket.Metadata["labels"])
+		}
+		if components, ok := ticket.Metadata["components"].([]string); !ok || len(components) != 1 {
+			t.Errorf("Metadata[components] = %v, want []string with 1 item", ticket.Metadata["components"])
+		}
 	})
 
 	t.Run("get non-existent ticket", func(t *testing.T) {
@@ -312,8 +337,10 @@ func TestGet(t *testing.T) {
 
 func TestQuery(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/rest/api/3/search") && r.Method == "GET" {
-			jql := r.URL.Query().Get("jql")
+		if r.URL.Path == "/rest/api/3/search/jql" && r.Method == "POST" {
+			var payload map[string]any
+			json.NewDecoder(r.Body).Decode(&payload)
+			jql, _ := payload["jql"].(string)
 
 			var issues []map[string]any
 
@@ -404,9 +431,8 @@ func TestQuery(t *testing.T) {
 				}
 			}
 
-			// Apply limit
-			maxResults := r.URL.Query().Get("maxResults")
-			if maxResults == "1" && len(issues) > 1 {
+			// Apply limit from payload
+			if maxResults, ok := payload["maxResults"].(float64); ok && int(maxResults) == 1 && len(issues) > 1 {
 				issues = issues[:1]
 			}
 
@@ -424,6 +450,7 @@ func TestQuery(t *testing.T) {
 	p := &JiraProvider{
 		cfg: Config{
 			Source:     "jira",
+			Email:      "test@example.com",
 			APIToken:   "test-token",
 			APIURL:     server.URL,
 			ProjectKey: "PROJ",
@@ -573,6 +600,7 @@ func TestUpdate(t *testing.T) {
 	p := &JiraProvider{
 		cfg: Config{
 			Source:     "jira",
+			Email:      "test@example.com",
 			APIToken:   "test-token",
 			APIURL:     server.URL,
 			ProjectKey: "PROJ",
@@ -756,6 +784,23 @@ func TestConvertJiraIssue(t *testing.T) {
 		AccountID:   "user456",
 		DisplayName: "Bob",
 	}
+	issue.Fields.Priority = &struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}{
+		ID:   "2",
+		Name: "Critical",
+	}
+	issue.Fields.IssueType.ID = "10002"
+	issue.Fields.IssueType.Name = "Story"
+	issue.Fields.Labels = []string{"feature", "ui"}
+	issue.Fields.Components = []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}{
+		{ID: "10000", Name: "Frontend"},
+		{ID: "10001", Name: "Backend"},
+	}
 	issue.Fields.Created = "2025-11-21T10:00:00Z"
 	issue.Fields.Updated = "2025-11-21T11:00:00Z"
 
@@ -790,5 +835,17 @@ func TestConvertJiraIssue(t *testing.T) {
 	}
 	if ticket.UpdatedAt.IsZero() {
 		t.Error("UpdatedAt should not be zero")
+	}
+	if ticket.Metadata["priority"] != "Critical" {
+		t.Errorf("Metadata[priority] = %v, want Critical", ticket.Metadata["priority"])
+	}
+	if ticket.Metadata["issue_type"] != "Story" {
+		t.Errorf("Metadata[issue_type] = %v, want Story", ticket.Metadata["issue_type"])
+	}
+	if labels, ok := ticket.Metadata["labels"].([]string); !ok || len(labels) != 2 {
+		t.Errorf("Metadata[labels] = %v, want []string{feature, ui}", ticket.Metadata["labels"])
+	}
+	if components, ok := ticket.Metadata["components"].([]string); !ok || len(components) != 2 {
+		t.Errorf("Metadata[components] = %v, want []string{Frontend, Backend}", ticket.Metadata["components"])
 	}
 }

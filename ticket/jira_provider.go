@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -32,6 +31,7 @@ type Config struct {
 	Source           string
 	APIToken         string
 	APIURL           string
+	Email            string
 	ProjectKey       string
 	DefaultIssueType string
 }
@@ -47,6 +47,9 @@ func New(cfg map[string]any) (coreticket.Provider, error) {
 	parsed := parseConfig(cfg)
 	if parsed.APIToken == "" {
 		return nil, errors.New("jira apiToken is required")
+	}
+	if parsed.Email == "" {
+		return nil, errors.New("jira email is required")
 	}
 	if parsed.ProjectKey == "" {
 		return nil, errors.New("jira projectKey is required")
@@ -71,6 +74,9 @@ func parseConfig(cfg map[string]any) Config {
 	}
 	if v, ok := cfg["apiToken"].(string); ok {
 		out.APIToken = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["email"].(string); ok {
+		out.Email = strings.TrimSpace(v)
 	}
 	if v, ok := cfg["apiURL"].(string); ok && v != "" {
 		out.APIURL = strings.TrimSpace(v)
@@ -122,8 +128,48 @@ func (p *JiraProvider) Create(ctx context.Context, in schema.CreateTicketInput) 
 
 	// Add custom fields if provided
 	if in.Fields != nil {
+		// Handle priority
+		if priority, ok := in.Fields["priority"].(string); ok && priority != "" {
+			payload["fields"].(map[string]any)["priority"] = map[string]string{
+				"name": priority,
+			}
+		}
+
+		// Handle labels
+		if labels, ok := in.Fields["labels"].([]string); ok && len(labels) > 0 {
+			payload["fields"].(map[string]any)["labels"] = labels
+		} else if labelsAny, ok := in.Fields["labels"].([]any); ok && len(labelsAny) > 0 {
+			labels := make([]string, len(labelsAny))
+			for i, l := range labelsAny {
+				if s, ok := l.(string); ok {
+					labels[i] = s
+				}
+			}
+			payload["fields"].(map[string]any)["labels"] = labels
+		}
+
+		// Handle components
+		if components, ok := in.Fields["components"].([]string); ok && len(components) > 0 {
+			componentObjs := make([]map[string]string, len(components))
+			for i, comp := range components {
+				componentObjs[i] = map[string]string{"name": comp}
+			}
+			payload["fields"].(map[string]any)["components"] = componentObjs
+		} else if componentsAny, ok := in.Fields["components"].([]any); ok && len(componentsAny) > 0 {
+			componentObjs := make([]map[string]string, len(componentsAny))
+			for i, c := range componentsAny {
+				if s, ok := c.(string); ok {
+					componentObjs[i] = map[string]string{"name": s}
+				}
+			}
+			payload["fields"].(map[string]any)["components"] = componentObjs
+		}
+
+		// Add any other custom fields not handled above
 		for k, v := range in.Fields {
-			payload["fields"].(map[string]any)[k] = v
+			if k != "priority" && k != "labels" && k != "components" {
+				payload["fields"].(map[string]any)[k] = v
+			}
 		}
 	}
 
@@ -137,7 +183,7 @@ func (p *JiraProvider) Create(ctx context.Context, in schema.CreateTicketInput) 
 		return schema.Ticket{}, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+p.cfg.APIToken)
+	req.SetBasicAuth(p.cfg.Email, p.cfg.APIToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
@@ -172,7 +218,7 @@ func (p *JiraProvider) Get(ctx context.Context, id string) (schema.Ticket, error
 		return schema.Ticket{}, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+p.cfg.APIToken)
+	req.SetBasicAuth(p.cfg.Email, p.cfg.APIToken)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := p.client.Do(req)
@@ -202,21 +248,30 @@ func (p *JiraProvider) Get(ctx context.Context, id string) (schema.Ticket, error
 func (p *JiraProvider) Query(ctx context.Context, q schema.TicketQuery) ([]schema.Ticket, error) {
 	jql := buildJQL(q, p.cfg.ProjectKey)
 
-	params := url.Values{}
-	params.Set("jql", jql)
+	// Use POST /rest/api/3/search/jql for JQL queries
+	reqURL := p.cfg.APIURL + "/rest/api/3/search/jql"
+
+	payload := map[string]any{
+		"jql":        jql,
+		"maxResults": 50,
+		"fields":     []string{"*all"},
+	}
 	if q.Limit > 0 {
-		params.Set("maxResults", fmt.Sprintf("%d", q.Limit))
-	} else {
-		params.Set("maxResults", "50")
+		payload["maxResults"] = q.Limit
 	}
 
-	reqURL := p.cfg.APIURL + "/rest/api/3/search?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal query payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+p.cfg.APIToken)
+	req.SetBasicAuth(p.cfg.Email, p.cfg.APIToken)
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := p.client.Do(req)
@@ -328,8 +383,48 @@ func (p *JiraProvider) Update(ctx context.Context, id string, in schema.UpdateTi
 
 	// Add custom fields if provided
 	if in.Fields != nil {
+		// Handle priority
+		if priority, ok := in.Fields["priority"].(string); ok && priority != "" {
+			payload["fields"].(map[string]any)["priority"] = map[string]string{
+				"name": priority,
+			}
+		}
+
+		// Handle labels
+		if labels, ok := in.Fields["labels"].([]string); ok {
+			payload["fields"].(map[string]any)["labels"] = labels
+		} else if labelsAny, ok := in.Fields["labels"].([]any); ok {
+			labels := make([]string, len(labelsAny))
+			for i, l := range labelsAny {
+				if s, ok := l.(string); ok {
+					labels[i] = s
+				}
+			}
+			payload["fields"].(map[string]any)["labels"] = labels
+		}
+
+		// Handle components
+		if components, ok := in.Fields["components"].([]string); ok {
+			componentObjs := make([]map[string]string, len(components))
+			for i, comp := range components {
+				componentObjs[i] = map[string]string{"name": comp}
+			}
+			payload["fields"].(map[string]any)["components"] = componentObjs
+		} else if componentsAny, ok := in.Fields["components"].([]any); ok {
+			componentObjs := make([]map[string]string, len(componentsAny))
+			for i, c := range componentsAny {
+				if s, ok := c.(string); ok {
+					componentObjs[i] = map[string]string{"name": s}
+				}
+			}
+			payload["fields"].(map[string]any)["components"] = componentObjs
+		}
+
+		// Add any other custom fields not handled above
 		for k, v := range in.Fields {
-			payload["fields"].(map[string]any)[k] = v
+			if k != "priority" && k != "labels" && k != "components" {
+				payload["fields"].(map[string]any)[k] = v
+			}
 		}
 	}
 
@@ -352,7 +447,7 @@ func (p *JiraProvider) Update(ctx context.Context, id string, in schema.UpdateTi
 			return schema.Ticket{}, fmt.Errorf("create request: %w", err)
 		}
 
-		req.Header.Set("Authorization", "Bearer "+p.cfg.APIToken)
+		req.SetBasicAuth(p.cfg.Email, p.cfg.APIToken)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 
@@ -383,7 +478,7 @@ func (p *JiraProvider) transitionIssue(ctx context.Context, id string, targetSta
 		return fmt.Errorf("create transitions request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+p.cfg.APIToken)
+	req.SetBasicAuth(p.cfg.Email, p.cfg.APIToken)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := p.client.Do(req)
@@ -440,7 +535,7 @@ func (p *JiraProvider) transitionIssue(ctx context.Context, id string, targetSta
 		return fmt.Errorf("create transition request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+p.cfg.APIToken)
+	req.SetBasicAuth(p.cfg.Email, p.cfg.APIToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
@@ -474,6 +569,20 @@ type jiraIssue struct {
 		Status struct {
 			Name string `json:"name"`
 		} `json:"status"`
+		Priority *struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"priority"`
+		IssueType struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"issuetype"`
+		Labels     []string `json:"labels"`
+		Components []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"components"`
 		Assignee *struct {
 			AccountID   string `json:"accountId"`
 			DisplayName string `json:"displayName"`
@@ -510,11 +619,46 @@ func convertJiraIssue(issue jiraIssue, source string) schema.Ticket {
 	// Extract assignees
 	if issue.Fields.Assignee != nil {
 		ticket.Assignees = []string{issue.Fields.Assignee.AccountID}
+		ticket.Metadata["assignee_name"] = issue.Fields.Assignee.DisplayName
 	}
 
 	// Extract reporter
 	if issue.Fields.Reporter != nil {
 		ticket.Reporter = issue.Fields.Reporter.AccountID
+		ticket.Metadata["reporter_name"] = issue.Fields.Reporter.DisplayName
+	}
+
+	// Extract priority
+	if issue.Fields.Priority != nil {
+		ticket.Metadata["priority"] = issue.Fields.Priority.Name
+		ticket.Metadata["priority_id"] = issue.Fields.Priority.ID
+	}
+
+	// Extract issue type
+	ticket.Metadata["issue_type"] = issue.Fields.IssueType.Name
+	ticket.Metadata["issue_type_id"] = issue.Fields.IssueType.ID
+	if issue.Fields.IssueType.Description != "" {
+		ticket.Metadata["issue_type_description"] = issue.Fields.IssueType.Description
+	}
+
+	// Extract labels
+	if len(issue.Fields.Labels) > 0 {
+		ticket.Metadata["labels"] = issue.Fields.Labels
+	}
+
+	// Extract components
+	if len(issue.Fields.Components) > 0 {
+		componentNames := make([]string, len(issue.Fields.Components))
+		componentDetails := make([]map[string]string, len(issue.Fields.Components))
+		for i, comp := range issue.Fields.Components {
+			componentNames[i] = comp.Name
+			componentDetails[i] = map[string]string{
+				"id":   comp.ID,
+				"name": comp.Name,
+			}
+		}
+		ticket.Metadata["components"] = componentNames
+		ticket.Metadata["component_details"] = componentDetails
 	}
 
 	// Parse timestamps
