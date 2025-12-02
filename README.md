@@ -29,6 +29,32 @@ make plugin    # builds ./bin/ticketplugin
 
 `go.mod` points at the sibling `opsorch-core` repo for local iteration. Remove the replace directive when publishing.
 
+## CI/CD
+
+The repository includes GitHub Actions workflows:
+
+- **CI** (`ci.yml`): Runs tests and linting on every push/PR to main
+- **Release** (`release.yml`): Manual workflow that:
+  - Runs tests and linting
+  - Creates version tags (patch/minor/major)
+  - Builds multi-arch binaries (linux-amd64, linux-arm64, darwin-amd64, darwin-arm64)
+  - Publishes binaries as GitHub release assets
+
+### Pre-Built Binaries
+
+Download pre-built plugin binaries from [GitHub Releases](https://github.com/opsorch/opsorch-jira-adapter/releases):
+
+```dockerfile
+# Use in custom Docker images
+FROM ghcr.io/opsorch/opsorch-core:latest
+WORKDIR /opt/opsorch
+
+ADD https://github.com/opsorch/opsorch-jira-adapter/releases/download/v0.1.0/ticketplugin-linux-amd64 ./plugins/ticketplugin
+RUN chmod +x ./plugins/ticketplugin
+
+ENV OPSORCH_TICKET_PLUGIN=/opt/opsorch/plugins/ticketplugin
+```
+
 ## Integration Testing
 
 The adapter includes integration tests that verify functionality against a live Jira Cloud instance.

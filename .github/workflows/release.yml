@@ -1,0 +1,221 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  # Run tests first to ensure quality
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ["1.21", "1.22"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Remove local replace directive
+        run: |
+          go mod edit -dropreplace github.com/opsorch/opsorch-core
+          go mod tidy
+
+      - name: Run tests
+        run: make test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Remove local replace directive
+        run: |
+          go mod edit -dropreplace github.com/opsorch/opsorch-core
+          go mod tidy
+
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "The following files need gofmt:" && echo "$files"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      - name: Run staticcheck
+        run: staticcheck ./...
+
+  # Calculate next version and create release
+  release:
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.new_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate next version
+        id: version
+        run: |
+          # Get the latest tag, default to v0.0.0 if none exists
+          LATEST_TAG=$(git tag -l 'v*' | sort -V | tail -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          
+          echo "Latest tag: $LATEST_TAG"
+          
+          # Remove 'v' prefix and split into parts
+          VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          
+          # Bump version based on input
+          case "${{ inputs.version_bump }}" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+          
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "New version: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a ${{ steps.version.outputs.new_version }} -m "Release ${{ steps.version.outputs.new_version }}"
+          git push origin ${{ steps.version.outputs.new_version }}
+
+  # Build plugin binaries for multiple platforms
+  build-binaries:
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Remove local replace directive
+        run: |
+          go mod edit -dropreplace github.com/opsorch/opsorch-core
+          go mod tidy
+
+      - name: Build plugin binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p bin
+          go build -o bin/ticketplugin-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/ticketplugin
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticketplugin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/ticketplugin-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  # Create GitHub Release with binary assets
+  github-release:
+    needs: [release, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag for changelog
+          PREVIOUS_TAG=$(git tag -l 'v*' | sort -V | tail -n2 | head -n1)
+          if [ -z "$PREVIOUS_TAG" ]; then
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          
+          echo "## Changes since $PREVIOUS_TAG" > changelog.md
+          echo "" >> changelog.md
+          git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..${{ needs.release.outputs.version }} >> changelog.md || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.release.outputs.version }}
+          name: Release ${{ needs.release.outputs.version }}
+          body_path: changelog.md
+          draft: false
+          prerelease: false
+          files: |
+            binaries/ticketplugin-linux-amd64/ticketplugin-linux-amd64
+            binaries/ticketplugin-linux-arm64/ticketplugin-linux-arm64
+            binaries/ticketplugin-darwin-amd64/ticketplugin-darwin-amd64
+            binaries/ticketplugin-darwin-arm64/ticketplugin-darwin-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
