@@ -804,7 +804,7 @@ func TestConvertJiraIssue(t *testing.T) {
 	issue.Fields.Created = "2025-11-21T10:00:00Z"
 	issue.Fields.Updated = "2025-11-21T11:00:00Z"
 
-	ticket := convertJiraIssue(issue, "jira")
+	ticket := convertJiraIssue(issue, "jira", "https://example.atlassian.net")
 
 	if ticket.ID != "10001" {
 		t.Errorf("ID = %v, want 10001", ticket.ID)
@@ -817,6 +817,9 @@ func TestConvertJiraIssue(t *testing.T) {
 	}
 	if ticket.Status != "To Do" {
 		t.Errorf("Status = %v, want To Do", ticket.Status)
+	}
+	if ticket.URL != "https://example.atlassian.net/browse/PROJ-1" {
+		t.Errorf("URL = %v, want https://example.atlassian.net/browse/PROJ-1", ticket.URL)
 	}
 	if ticket.Description != "First paragraph Second paragraph" {
 		t.Errorf("Description = %v, want First paragraph Second paragraph", ticket.Description)

@@ -13,6 +13,7 @@ bin/
 
 # Go workspace file
 go.work
+.env.local
 
 # Build cache
 .gocache/

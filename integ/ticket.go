@@ -86,6 +86,9 @@ func main() {
 			}
 			fmt.Printf("  [%d] Key: %s, Title: %s, Status: %s\n",
 				i+1, t.Key, t.Title, t.Status)
+			if t.URL != "" {
+				fmt.Printf("       URL: %s\n", t.URL)
+			}
 
 			// Display metadata fields if present
 			if priority, ok := t.Metadata["priority"].(string); ok {
@@ -175,6 +178,7 @@ func main() {
 			} else if updatedTicket.Description != updatedDesc {
 				testResult("Validate updated description", fmt.Errorf("expected %s, got %s", updatedDesc, updatedTicket.Description))
 			} else {
+				fmt.Printf("✅ Updated ticket URL: %s\n", updatedTicket.URL)
 				testResult("Update ticket", nil)
 			}
 		}
