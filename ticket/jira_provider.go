@@ -79,7 +79,7 @@ func parseConfig(cfg map[string]any) Config {
 		out.Email = strings.TrimSpace(v)
 	}
 	if v, ok := cfg["apiURL"].(string); ok && v != "" {
-		out.APIURL = strings.TrimSpace(v)
+		out.APIURL = strings.TrimRight(strings.TrimSpace(v), "/")
 	}
 	if v, ok := cfg["projectKey"].(string); ok {
 		out.ProjectKey = strings.TrimSpace(v)
@@ -241,7 +241,7 @@ func (p *JiraProvider) Get(ctx context.Context, id string) (schema.Ticket, error
 		return schema.Ticket{}, fmt.Errorf("decode response: %w", err)
 	}
 
-	return convertJiraIssue(issue, p.cfg.Source), nil
+	return convertJiraIssue(issue, p.cfg.Source, p.cfg.APIURL), nil
 }
 
 // Query searches for Jira issues using JQL.
@@ -294,7 +294,7 @@ func (p *JiraProvider) Query(ctx context.Context, q schema.TicketQuery) ([]schem
 
 	tickets := make([]schema.Ticket, len(result.Issues))
 	for i, issue := range result.Issues {
-		tickets[i] = convertJiraIssue(issue, p.cfg.Source)
+		tickets[i] = convertJiraIssue(issue, p.cfg.Source, p.cfg.APIURL)
 	}
 
 	return tickets, nil
@@ -596,12 +596,13 @@ type jiraIssue struct {
 	} `json:"fields"`
 }
 
-func convertJiraIssue(issue jiraIssue, source string) schema.Ticket {
+func convertJiraIssue(issue jiraIssue, source string, apiURL string) schema.Ticket {
 	ticket := schema.Ticket{
 		ID:       issue.ID,
 		Key:      issue.Key,
 		Title:    issue.Fields.Summary,
 		Status:   issue.Fields.Status.Name,
+		URL:      fmt.Sprintf("%s/browse/%s", apiURL, issue.Key),
 		Metadata: map[string]any{"source": source},
 	}
 
